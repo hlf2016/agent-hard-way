@@ -12,6 +12,8 @@ import (
 	"strings"
 )
 
+// ---- 工具层 ----
+
 // toolSpec 是发给模型的声明，和练习 5 相同。
 type toolSpec struct {
 	Name        string         `json:"name"`
@@ -158,6 +160,76 @@ func (editFileTool) execute(args string) string {
 	}
 	return "已替换 " + in.Path + " 中的一处文本"
 }
+
+// ---- 注册表层 ----
+
+// registry 按名字分发工具调用，并在这一层安装横切纪律。
+// 纪律装在注册表而不是某个工具里，因为它管的是工具**之间**的关系。
+type registry struct {
+	tools   map[string]tool
+	order   []string        // 保证声明顺序 发给模型的列表要稳定
+	hasRead map[string]bool // read-before-write 记录这个会话里读过哪些文件
+}
+
+func newRegistry(tools ...tool) *registry {
+	r := &registry{tools: map[string]tool{}, hasRead: map[string]bool{}}
+	for _, tool := range tools {
+		spec := tool.definition()
+		r.tools[spec.Name] = tool
+		r.order = append(r.order, spec.Name)
+	}
+	return r
+}
+
+// definition() 生成发给模型的 tools 数组
+func (r *registry) definitions() []map[string]any {
+	var out []map[string]any
+	for _, toolName := range r.order {
+		tool := r.tools[toolName]
+		out = append(out, map[string]any{
+			"type":     "function",
+			"function": tool.definition(),
+		})
+	}
+	return out
+}
+
+// execute 查表分发执行 改文件的调用先过 read-before-write 检查
+// 没读过不允许改文件  模型会先去读然后带着事实回来
+func (r *registry) execute(name, args string) string {
+	t, ok := r.tools[name]
+	if !ok {
+		return "错误：未知工具" + name
+	}
+	if name == "write_file" || name == "edit_file" {
+		if path := pathOf(args); path != "" && fileExists(path) && !r.hasRead[path] {
+			return "错误：" + path + " 已存在但这个会话里还没读到它，先用 read_file 看一眼，再来修改"
+		}
+	}
+
+	result := t.execute(args)
+	// 调用成功就记账 读过的文件可以改 刚写完的文件模型知道最新内容 也是读过
+	if path := pathOf(args); path != "" && !strings.HasPrefix(result, "错误：") {
+		r.hasRead[path] = true
+	}
+
+	return result
+}
+
+func pathOf(args string) string {
+	var in struct {
+		Path string `json:"path"`
+	}
+	_ = json.Unmarshal([]byte(args), &in)
+	return in.Path
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// ---- 协议层：和练习 5 相同 ----
 
 func main() {
 	if len(os.Args) < 2 {
