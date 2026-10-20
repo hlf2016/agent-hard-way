@@ -6,8 +6,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 )
@@ -230,6 +233,43 @@ func fileExists(path string) bool {
 }
 
 // ---- 协议层：和练习 5 相同 ----
+type toolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type message struct {
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+type request struct {
+	Model     string           `json:"model"`
+	Messages  []message        `json:"messages"`
+	MaxTokens int              `json:"max_tokens,omitempty"`
+	Tools     []map[string]any `json:"tools,omitempty"`
+}
+
+type response struct {
+	Choices []struct {
+		Message      message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
+	Error *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+	} `json:"error"`
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -256,4 +296,79 @@ func main() {
 		writeFileTool{},
 		editFileTool{},
 	)
+
+	history := []message{{Role: "user", Content: os.Args[1]}}
+	// agent loop 的结构和练习 5 完全一样。变化只有两处：
+	// 工具声明从注册表拿（reg.definitions），分发交给注册表（reg.execute）。
+	const maxRounds = 10
+	for round := 1; round <= maxRounds; round++ {
+		r, err := send(base, apiKey, model, history, reg.definitions())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		msg := r.Choices[0].Message
+		history = append(history, msg)
+		if r.Choices[0].FinishReason != "tool_calls" {
+			fmt.Println(msg.Content)
+			fmt.Fprintf(os.Stderr, "\n[共 %d 轮 . 最后一轮输入 %d tokens . finish_reason=%s]\n", round, maxRounds, r.Choices[0].FinishReason)
+			return
+		}
+
+		for _, tc := range msg.ToolCalls {
+			fmt.Fprintf(os.Stderr, "[round %d] %s(%s)\n", round, tc.Function.Name, tc.Function.Arguments)
+			result := reg.execute(tc.Function.Name, tc.Function.Arguments)
+			history = append(history, message{
+				Role:       "tool",
+				ToolCallID: tc.ID,
+				Content:    result,
+			})
+		}
+	}
+	fmt.Errorf("达到 %d 轮上限，停止", maxRounds)
+	os.Exit(1)
+}
+
+func send(base, apiKey, model string, history []message, tools []map[string]any) (response, error) {
+	var r response
+	body, _ := json.Marshal(request{
+		Model:     model,
+		Messages:  history,
+		MaxTokens: 4096,
+		Tools:     tools,
+	})
+	req, err := http.NewRequest("POST", base+"/chat/completions", bytes.NewBuffer(body))
+	if err != nil {
+		return r, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return r, fmt.Errorf("请求失败： %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	// 判断响应状态码是否 200
+	if resp.StatusCode != 200 {
+		return r, fmt.Errorf("HTTP %d - %s", resp.StatusCode, raw)
+	}
+
+	// 判断响应体能否json解析
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return r, fmt.Errorf("解析失败 %w\n,原始响应：%s", err, raw)
+	}
+
+	// 判断响应的 Error 字段是否为空
+	if r.Error != nil {
+		return r, fmt.Errorf("API 错误：[%s]: %s", r.Error.Type, r.Error.Message)
+	}
+
+	// 判断 r.Choices 的长度是否不为 0
+	if len(r.Choices) == 0 {
+		return r, fmt.Errorf("空响应：%s", raw)
+	}
+
+	return r, nil
 }
