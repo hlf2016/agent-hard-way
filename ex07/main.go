@@ -40,7 +40,8 @@ func (bashTool) definition() toolSpec {
 		Description: "在系统 shell 里运行一条命令，返回 stdout 和 stderr 。 " +
 			"命令总是在固定的工作目录执行 cd 不会跨调用生效。" +
 			"默认 30 秒超时，如果预计时间更长就传入 timeout（整数秒，上限 120）。" +
-			"能用 read_file/write_file/edit_file 完成的事儿，优先用那些专用工具。",
+			"能用 read_file/write_file/edit_file 完成的事儿，优先用那些专用工具。" +
+			"禁止用重定向或 sed 修改文件， 修改文件必须用 edit_file",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
