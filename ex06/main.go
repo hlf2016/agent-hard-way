@@ -128,6 +128,10 @@ func (editFileTool) definition() toolSpec {
 					"type":        "string",
 					"description": "替换的新文本，可以为空（等于删除）",
 				},
+				"replace_all": map[string]any{
+					"type":        "boolean",
+					"description": "是否全部替换，为 true 时替换全部出现， 不再要求唯一",
+				},
 			},
 			"required": []string{"path", "old_string", "new_string"},
 		},
@@ -136,9 +140,10 @@ func (editFileTool) definition() toolSpec {
 
 func (editFileTool) execute(args string) string {
 	var in struct {
-		Path      string `json:"path"`
-		OldString string `json:"old_string"`
-		NewString string `json:"new_string"`
+		Path       string `json:"path"`
+		OldString  string `json:"old_string"`
+		NewString  string `json:"new_string"`
+		ReplaceAll bool   `json:"replace_all"`
 	}
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "错误: 参数不是合法 JSON: " + err.Error()
@@ -153,7 +158,7 @@ func (editFileTool) execute(args string) string {
 		return "错误: old_string 不能为空"
 	case n == 0:
 		return "错误: old_string 在文件里找不到——和 read_file 看到的原文逐字对一下"
-	case n > 1:
+	case n > 1 && in.ReplaceAll:
 		return fmt.Sprintf("错误: old_string 出现了 %d 次，无法确定改哪一处——多带几行上下文让它唯一", n)
 	}
 
@@ -162,6 +167,46 @@ func (editFileTool) execute(args string) string {
 		return "错误: " + err.Error()
 	}
 	return "已替换 " + in.Path + " 中的一处文本"
+}
+
+type listDirTool struct{}
+
+func (listDirTool) definition() toolSpec {
+	return toolSpec{
+		Name:        "list_dir",
+		Description: "列出当前目录下内容",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "要列出的文件目录",
+				},
+			},
+		},
+	}
+}
+
+func (listDirTool) execute(args string) string {
+	var in struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(args), &in); err != nil {
+		return "错误， 参数不是合法 json：" + err.Error()
+	}
+	entries, err := os.ReadDir(in.Path)
+	if err != nil {
+		return "列出文件失败：" + err.Error()
+	}
+	var sb strings.Builder
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() {
+			name += "/"
+		}
+		sb.WriteString("- " + name + "\n")
+	}
+	return sb.String()
 }
 
 // ---- 注册表层 ----
@@ -200,6 +245,7 @@ func (r *registry) definitions() []map[string]any {
 // execute 查表分发执行 改文件的调用先过 read-before-write 检查
 // 没读过不允许改文件  模型会先去读然后带着事实回来
 func (r *registry) execute(name, args string) string {
+	fmt.Println(r.hasRead)
 	t, ok := r.tools[name]
 	if !ok {
 		return "错误：未知工具" + name
@@ -295,6 +341,7 @@ func main() {
 		readFileTool{},
 		writeFileTool{},
 		editFileTool{},
+		listDirTool{},
 	)
 
 	history := []message{{Role: "user", Content: os.Args[1]}}
