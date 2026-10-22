@@ -183,6 +183,7 @@ func (listDirTool) definition() toolSpec {
 					"description": "要列出的文件目录",
 				},
 			},
+			"required": []string{"path"},
 		},
 	}
 }
@@ -192,11 +193,11 @@ func (listDirTool) execute(args string) string {
 		Path string `json:"path"`
 	}
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
-		return "错误， 参数不是合法 json：" + err.Error()
+		return "错误： 参数不是合法 json：" + err.Error()
 	}
 	entries, err := os.ReadDir(in.Path)
 	if err != nil {
-		return "列出文件失败：" + err.Error()
+		return "错误：列出文件失败：" + err.Error()
 	}
 	var sb strings.Builder
 	for _, entry := range entries {
