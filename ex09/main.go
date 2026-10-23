@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -14,6 +15,92 @@ import (
 	"strings"
 	"time"
 )
+
+// decision 是权限检查的结论 档位从低到高 allow < ask < deny
+type decision int
+
+const (
+	decisionAllow decision = iota
+	decisionAsk
+	decisionDeny
+)
+
+// permRule 是一条模式规则 命令里出现了 pattern 就归到 decide 那一档
+type permRule struct {
+	pattern string
+	decide  decision
+}
+
+// bashRules 蒸馏自 octo 的 internal/permission/defaults.yml——声明顺序不重要，
+// 重要的是档位：deny 赢 ask，ask 赢 allow。一条规则都没命中时，隐式默认是
+// ask——宁可多问一句，不要放过一个没见过的命令。
+var bashRules = []permRule{
+	{"rm -rf /", decisionDeny},
+	{"rm -rf ~", decisionDeny},
+	{"rm -rf", decisionAsk},
+	{"sudo ", decisionAsk},
+	{"git commit", decisionAsk},
+	{"git push --force", decisionAsk},
+	{"curl ", decisionAsk},
+	{"ls", decisionAllow},
+	{"cat ", decisionAllow},
+	{"pwd", decisionAllow},
+	{"echo ", decisionAllow},
+	{"git status", decisionAllow},
+}
+
+// classifyBash 给一条 shell 命令分档。分三遍独立扫描，而不是一遍碰到就返回，
+// 就是为了让"deny 赢 ask 赢 allow"这件事跟规则声明的先后顺序无关。
+func classifyBash(cmd string) decision {
+	for _, r := range bashRules {
+		if r.decide == decisionDeny && strings.Contains(cmd, r.pattern) {
+			return decisionDeny
+		}
+	}
+	for _, r := range bashRules {
+		if r.decide == decisionAsk && strings.Contains(cmd, r.pattern) {
+			return decisionAsk
+		}
+	}
+	for _, r := range bashRules {
+		if r.decide != decisionAllow && strings.Contains(cmd, r.pattern) {
+			continue
+		}
+		// allow 比 deny/ask 挑剔：命令必须以这个词开头，且整条命令里不能有
+		// shell 的链接符号——否则 "ls && rm -rf /" 会被 "ls" 这条规则放行。
+		trimmed := strings.TrimLeft(cmd, " \t")
+		if strings.HasPrefix(trimmed, r.pattern) && !containsShellChain(cmd) {
+			return decisionAllow
+		}
+	}
+	return decisionAsk
+}
+
+// containsShellChain 检查命令里有没有把一条命令接到另一条上的符号。
+func containsShellChain(cmd string) bool {
+	return strings.Contains(cmd, ";|&$()`\n")
+}
+
+// askApproval 停下来问人，不是问模型——危险命令要过这一关，
+// 模型自己怎么想不算数。读不到回答（比如脚本化调用、没有终端）一律按拒绝处理，
+// 安全边界宁可保守，不能因为读不到输入就放行。
+func askApproval(cmd string) bool {
+	fmt.Fprintf(os.Stderr, "\n⚠️  模型想执行: %s\n允许吗？(y/N)", cmd)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return false
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes"
+}
+
+func commandOf(args string) string {
+	var in struct {
+		Command string `json:"command"`
+	}
+	_ = json.Unmarshal([]byte(args), &in)
+	return in.Command
+}
 
 // ---- base prompt：给模型的说明书 ----
 
@@ -359,6 +446,19 @@ func (r *registry) execute(name, args string) string {
 		if path := pathOf(args); path != "" && fileExists(path) && !r.hasRead[path] {
 			return "错误：" + path + " 已存在但这个会话里还没读到它，先用 read_file 看一眼，再来修改"
 		}
+	}
+
+	if name == "bash" {
+		cmd := commandOf(args)
+		switch classifyBash(cmd) {
+		case decisionDeny:
+			return "错误: 权限拒绝——这条命令匹配了硬性禁止规则，不会执行，也不会询问。"
+		case decisionAsk:
+			if !askApproval(cmd) {
+				return "错误: 权限拒绝——用户没有批准这条命令。"
+			}
+		}
+
 	}
 
 	result := t.execute(args)
