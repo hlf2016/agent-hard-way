@@ -59,6 +59,9 @@ func classifyBash(cmd string) decision {
 	}
 	for _, r := range bashRules {
 		if r.decide == decisionAsk && strings.Contains(cmd, r.pattern) {
+			if strictMode {
+				return decisionDeny
+			}
 			return decisionAsk
 		}
 	}
@@ -72,6 +75,9 @@ func classifyBash(cmd string) decision {
 		if strings.HasPrefix(trimmed, r.pattern) && !containsShellChain(cmd) {
 			return decisionAllow
 		}
+	}
+	if strictMode {
+		return decisionDeny
 	}
 	return decisionAsk
 }
@@ -452,6 +458,7 @@ func (r *registry) execute(name, args string) string {
 		cmd := commandOf(args)
 		switch classifyBash(cmd) {
 		case decisionDeny:
+			fmt.Println("错误: 权限拒绝——这条命令匹配了硬性禁止规则，不会执行，也不会询问。")
 			return "错误: 权限拒绝——这条命令匹配了硬性禁止规则，不会执行，也不会询问。"
 		case decisionAsk:
 			if !askApproval(cmd) {
@@ -525,6 +532,8 @@ type response struct {
 	} `json:"error"`
 }
 
+var strictMode bool = false
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, `用法: ./ex06 "你的任务"`)
@@ -532,6 +541,9 @@ func main() {
 	}
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	model := os.Getenv("MODEL")
+	if os.Getenv("STRICT") == "1" {
+		strictMode = true
+	}
 	if apiKey == "" || model == "" {
 		fmt.Fprintln(os.Stderr, "需要环境变量 OPENAI_API_KEY 和 MODEL")
 		fmt.Fprintln(os.Stderr, `例: export OPENAI_API_KEY=sk-xxxx`)
