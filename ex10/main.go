@@ -342,6 +342,59 @@ func (writeFileTool) execute(args string) string {
 // restore 找 trashDir 里这个文件名最新的一份备份，写回原路径。恢复动作
 // 本身也先给"现在这份"备份一次——误删保护对自己也生效，不会因为你手滑
 // 恢复错了版本就白白丢掉当前内容。
+func restore(path string) int {
+	entries, err := os.ReadDir(trashDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "错误: 没有找到", trashDir, "目录，或读取失败:", err)
+		return 1
+	}
+	suffix := "_" + filepath.Base(path)
+	var newest string
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), suffix) && entry.Name() > newest {
+			newest = entry.Name()
+		}
+	}
+	if newest == "" {
+		fmt.Fprintf(os.Stderr, "错误: %s 里没有 %s 的备份\n", trashDir, filepath.Base(path))
+		return 1
+	}
+	if _, err := backupIfExists(path); err != nil {
+		fmt.Fprintln(os.Stderr, "错误：备份当前版本失败，为安全起见拒绝恢复：", err)
+		return 1
+	}
+	data, err := os.ReadFile(filepath.Join(trashDir, newest))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "错误：", err)
+		return 1
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "错误：", err)
+		return 1
+	}
+	fmt.Printf("已从 %s 恢复到 %s\n", filepath.Join(trashDir, newest), path)
+	return 0
+}
+
+func listRestoreFiles(path string) int {
+	entries, err := os.ReadDir(trashDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "错误：没有找到 ", trashDir, " 目录，或读取失败：", err)
+		return 1
+	}
+	suffix := "_" + filepath.Base(path)
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), suffix) {
+			info, err := entry.Info()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "获取 %s 的文件信息失败：%s\n", entry.Name(), err.Error())
+				return 1
+			}
+			fmt.Println(entry.Name(), " --- ", info.Size(), "bytes")
+		}
+	}
+	return 0
+}
 
 // editFileTool 精确替换文件中的一段文本。octo 的设计原样蒸馏：
 // old_string 必须在文件里恰好出现一次——多了说明定位不唯一，少了说明找错了，
@@ -402,11 +455,15 @@ func (editFileTool) execute(args string) string {
 		return fmt.Sprintf("错误: old_string 出现了 %d 次，无法确定改哪一处——多带几行上下文让它唯一", n)
 	}
 
+	backup, err := backupIfExists(in.Path)
+	if err != nil {
+		return "错误：备份旧内容失败，未安全起见拒绝修改：" + err.Error()
+	}
 	text = strings.Replace(text, in.OldString, in.NewString, 1)
 	if err := os.WriteFile(in.Path, []byte(text), 0o644); err != nil {
 		return "错误: " + err.Error()
 	}
-	return "已替换 " + in.Path + " 中的一处文本"
+	return fmt.Sprintf("已把旧内容备份到 %s, 其中的 %s 替换成了 %s\n", backup, in.OldString, in.NewString)
 }
 
 type listDirTool struct{}
@@ -577,6 +634,12 @@ type response struct {
 var strictMode bool = false
 
 func main() {
+	if len(os.Args) == 4 && os.Args[1] == "-restore" && os.Args[2] == "-list" {
+		os.Exit(listRestoreFiles(os.Args[3]))
+	}
+	if len(os.Args) == 3 && os.Args[1] == "-restore" {
+		os.Exit(restore(os.Args[2]))
+	}
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, `用法: ./ex06 "你的任务"`)
 		os.Exit(1)
