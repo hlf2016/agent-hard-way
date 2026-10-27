@@ -2,3 +2,4 @@
 *.exe
 secret.txt
 *.txt
+*.jsonl
