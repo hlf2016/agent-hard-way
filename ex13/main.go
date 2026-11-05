@@ -286,7 +286,7 @@ func (s *session) appendDelta() error {
 }
 
 func (s *session) rewriteAll() error {
-	f, err := os.OpenFile(sessionPath(s.ID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(sessionPath(s.ID), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
@@ -1056,7 +1056,22 @@ func main() {
 		}
 		msg := r.Choices[0].Message
 		sess.History = append(sess.History, msg)
-		checkBudget(r.Usage.PromptTokens, window)
+
+		// 超出就压缩
+		if checkBudget(r.Usage.PromptTokens, window) {
+			trigger := int(float64(window) * budgetFraction)
+			keepBudget := compactKeepBudget(window, trigger)
+			rebuilt, folded, err := compact(base, apiKey, model, sess.History, keepBudget)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "警告: 压缩失败，继续用未压缩的历史:", err)
+			} else if folded > 0 {
+				fmt.Fprintf(os.Stderr, "[压缩：把前 %d 条消息折叠成一条摘要，%d 条 → %d 条]\n", folded, len(sess.History), len(rebuilt))
+				sess.History = rebuilt
+				sess.forceRewrite = true
+			} else {
+				fmt.Fprintf(os.Stderr, "[压缩：还没有两条完整的用户消息可折叠，跳过这一轮]\n")
+			}
+		}
 
 		if r.Choices[0].FinishReason != "tool_calls" {
 			fmt.Println(msg.Content)
